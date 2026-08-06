@@ -1,0 +1,135 @@
+import express from "express";
+import cors from "cors";
+import PDFDocument from "pdfkit";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || "JSB IT Ticketing <onboarding@resend.dev>";
+const TECH_EMAIL = process.env.TECH_EMAIL || "tech@armoroctrading.com";
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+
+function formatDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function buildTicketPdf(ticket) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    try {
+      doc.image(path.join(__dirname, "assets", "logo.png"), 50, 42, { width: 44 });
+    } catch (e) {
+      console.warn("Could not embed logo in PDF:", e.message);
+    }
+
+    doc.fontSize(16).fillColor("#0A1442").text("JSB Investments Inc. — IT Support Ticket", 108, 48);
+    doc.fontSize(10).fillColor("#5A6B8C").text("Group of Companies · IT Support Desk", 108, 70);
+    doc.moveTo(50, 100).lineTo(545, 100).strokeColor("#0A1442").lineWidth(2).stroke();
+
+    doc.fontSize(13).fillColor("#0A1442").text(`Ticket ${ticket.id}`, 50, 122);
+
+    const rows = [["Employee Name", ticket.employeeName], ["Problem Type", ticket.category]];
+    if (ticket.otherDescription) rows.push(["Description", ticket.otherDescription]);
+    rows.push(["Priority", ticket.priority]);
+    rows.push(["Needed By", formatDate(ticket.neededBy)]);
+    rows.push(["Opened At", formatDate(ticket.openedAt)]);
+
+    let y = 152;
+    rows.forEach(([label, value]) => {
+      doc.fontSize(11).font("Helvetica-Bold").fillColor("#0A1442").text(label, 50, y, { width: 150 });
+      doc.fontSize(11).font("Helvetica").fillColor("#16213E").text(String(value || "—"), 210, y, { width: 335 });
+      y += 26;
+    });
+
+    doc
+      .fontSize(9)
+      .fillColor("#8896AA")
+      .text(
+        `Generated on ${formatDate(new Date().toISOString())} · JSB Investments Inc. IT Support Ticketing System`,
+        50,
+        760
+      );
+
+    doc.end();
+  });
+}
+
+app.get("/", (req, res) => {
+  res.send("JSB IT Ticketing notify server is running.");
+});
+
+app.post("/api/tickets/notify", async (req, res) => {
+  const t = req.body || {};
+  if (!t.id || !t.employeeName || !t.category || !t.priority) {
+    return res.status(400).json({ ok: false, error: "Missing required ticket fields." });
+  }
+  if (!RESEND_API_KEY) {
+    return res.status(500).json({ ok: false, error: "Server is missing RESEND_API_KEY." });
+  }
+
+  try {
+    const pdfBuffer = await buildTicketPdf(t);
+    const subject = `IT Ticket ${t.id} [${t.priority}] - ${t.category}`;
+    const bodyLines = [
+      "New IT Support Ticket",
+      `Ticket ID: ${t.id}`,
+      `Employee: ${t.employeeName}`,
+      `Problem: ${t.category}${t.otherDescription ? " — " + t.otherDescription : ""}`,
+      `Priority: ${t.priority}`,
+      `Needed by: ${formatDate(t.neededBy)}`,
+      `Opened at: ${formatDate(t.openedAt)}`,
+    ];
+
+    const resendRes = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_EMAIL,
+        to: [TECH_EMAIL],
+        subject,
+        text: bodyLines.join("\n"),
+        attachments: [
+          {
+            filename: `${t.id}.pdf`,
+            content: pdfBuffer.toString("base64"),
+          },
+        ],
+      }),
+    });
+
+    if (!resendRes.ok) {
+      const errText = await resendRes.text();
+      console.error("Resend rejected the request:", errText);
+      return res.status(502).json({ ok: false, error: "Email provider rejected the request." });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Failed to generate or send the ticket email." });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Notify server listening on port ${PORT}`));
