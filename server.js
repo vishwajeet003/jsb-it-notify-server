@@ -47,7 +47,8 @@ function buildTicketPdf(ticket) {
     doc.fontSize(13).fillColor("#0A1442").text(`Ticket ${ticket.id}`, 50, 122);
 
     const rows = [["Employee Name", ticket.employeeName], ["Problem Type", ticket.category]];
-    if (ticket.otherDescription) rows.push(["Description", ticket.otherDescription]);
+    if (ticket.otherDescription) rows.push(["Problem Description", ticket.otherDescription]);
+    if (ticket.description) rows.push(["Additional Details", ticket.description]);
     rows.push(["Priority", ticket.priority]);
     rows.push(["Needed By", formatDate(ticket.neededBy)]);
     rows.push(["Opened At", formatDate(ticket.openedAt)]);
@@ -93,6 +94,7 @@ app.post("/api/tickets/notify", async (req, res) => {
       `Ticket ID: ${t.id}`,
       `Employee: ${t.employeeName}`,
       `Problem: ${t.category}${t.otherDescription ? " — " + t.otherDescription : ""}`,
+      ...(t.description ? [`Description: ${t.description}`] : []),
       `Priority: ${t.priority}`,
       `Needed by: ${formatDate(t.neededBy)}`,
       `Opened at: ${formatDate(t.openedAt)}`,
