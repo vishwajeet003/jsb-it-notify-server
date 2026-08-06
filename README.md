@@ -1,6 +1,6 @@
 # JSB IT Ticketing — Notify Server
 
-Tiny server that receives a submitted ticket from the ticketing app (`index.html`), generates a PDF, and emails it to the IT technician automatically via [Resend](https://resend.com).
+Tiny server that receives a submitted ticket from the ticketing app (`index.html`), generates a PDF, and automatically emails it to the IT technician via [Resend](https://resend.com) — and, optionally, sends the same PDF to a Telegram chat via a bot.
 
 ## 1. Get a Resend API key
 
@@ -20,6 +20,17 @@ TECH_EMAIL=tech@armoroctrading.com
 
 Once you've verified a domain in Resend, change `FROM_EMAIL` to something like:
 `FROM_EMAIL=JSB IT Ticketing <noreply@armoroctrading.com>`
+
+## 2b. (Optional) Set up Telegram for automatic chat notifications
+
+This is free forever and takes about 2 minutes — no business verification needed, unlike WhatsApp's Business API.
+
+1. In Telegram, search for **@BotFather** and start a chat with it.
+2. Send `/newbot`, give it a name, then a username ending in `bot` (e.g. `JsbItTicketingBot`).
+3. BotFather replies with a token like `123456789:ABCdefGhIJKlmNoPQRstuVWXyz` — this is `TELEGRAM_BOT_TOKEN`.
+4. Now open a chat with **your new bot** (search its username) and send it any message, e.g. "hi".
+5. In a browser, visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` (replace `<YOUR_TOKEN>`). Look for `"chat":{"id":123456789,...}` in the response — that number is `TELEGRAM_CHAT_ID`.
+6. Add both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to your `.env` (and later, to Render's environment variables). Leave them blank to skip Telegram entirely — email will keep working either way.
 
 ## 3. Run it locally (optional, to test)
 
@@ -46,7 +57,7 @@ You should get `{"ok":true}` and an email should land at `tech@armoroctrading.co
    - **Build Command:** `npm install`
    - **Start Command:** `npm start`
    - **Instance Type:** Free
-4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`).
+4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`, and `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` if using Telegram).
 5. Click **Create Web Service**. After it deploys, Render gives you a URL like `https://jsb-it-notify.onrender.com`.
 
 ## 5. Wire it into the ticketing app

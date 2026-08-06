@@ -9,6 +9,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "JSB IT Ticketing <onboarding@resend.dev>";
 const TECH_EMAIL = process.env.TECH_EMAIL || "tech@armoroctrading.com";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const app = express();
 app.use(cors());
@@ -73,6 +75,67 @@ function buildTicketPdf(ticket) {
   });
 }
 
+function ticketSummaryLines(t) {
+  const lines = [
+    "New IT Support Ticket",
+    `Ticket ID: ${t.id}`,
+    `Employee: ${t.employeeName}`,
+    `Problem: ${t.category}${t.otherDescription ? " — " + t.otherDescription : ""}`,
+  ];
+  if (t.description) lines.push(`Description: ${t.description}`);
+  lines.push(`Priority: ${t.priority}`, `Needed by: ${formatDate(t.neededBy)}`, `Opened at: ${formatDate(t.openedAt)}`);
+  return lines;
+}
+
+async function sendEmail(t, pdfBuffer) {
+  const subject = `IT Ticket ${t.id} [${t.priority}] - ${t.category}`;
+  const resendRes = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: [TECH_EMAIL],
+      subject,
+      text: ticketSummaryLines(t).join("\n"),
+      attachments: [
+        {
+          filename: `${t.id}.pdf`,
+          content: pdfBuffer.toString("base64"),
+        },
+      ],
+    }),
+  });
+
+  if (!resendRes.ok) {
+    const errText = await resendRes.text();
+    console.error("Resend rejected the request:", errText);
+    throw new Error("Email provider rejected the request.");
+  }
+}
+
+async function sendTelegram(t, pdfBuffer) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  const caption = ticketSummaryLines(t).join("\n").slice(0, 1024);
+  const form = new FormData();
+  form.append("chat_id", TELEGRAM_CHAT_ID);
+  form.append("caption", caption);
+  form.append("document", new Blob([pdfBuffer], { type: "application/pdf" }), `${t.id}.pdf`);
+
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("Telegram rejected the request:", errText);
+  }
+}
+
 app.get("/", (req, res) => {
   res.send("JSB IT Ticketing notify server is running.");
 });
@@ -88,48 +151,18 @@ app.post("/api/tickets/notify", async (req, res) => {
 
   try {
     const pdfBuffer = await buildTicketPdf(t);
-    const subject = `IT Ticket ${t.id} [${t.priority}] - ${t.category}`;
-    const bodyLines = [
-      "New IT Support Ticket",
-      `Ticket ID: ${t.id}`,
-      `Employee: ${t.employeeName}`,
-      `Problem: ${t.category}${t.otherDescription ? " — " + t.otherDescription : ""}`,
-      ...(t.description ? [`Description: ${t.description}`] : []),
-      `Priority: ${t.priority}`,
-      `Needed by: ${formatDate(t.neededBy)}`,
-      `Opened at: ${formatDate(t.openedAt)}`,
-    ];
+    await sendEmail(t, pdfBuffer);
 
-    const resendRes = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: FROM_EMAIL,
-        to: [TECH_EMAIL],
-        subject,
-        text: bodyLines.join("\n"),
-        attachments: [
-          {
-            filename: `${t.id}.pdf`,
-            content: pdfBuffer.toString("base64"),
-          },
-        ],
-      }),
-    });
-
-    if (!resendRes.ok) {
-      const errText = await resendRes.text();
-      console.error("Resend rejected the request:", errText);
-      return res.status(502).json({ ok: false, error: "Email provider rejected the request." });
+    try {
+      await sendTelegram(t, pdfBuffer);
+    } catch (telegramErr) {
+      console.error("Telegram notification failed (non-fatal):", telegramErr);
     }
 
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to generate or send the ticket email." });
+    return res.status(500).json({ ok: false, error: "Failed to generate or send the ticket notification." });
   }
 });
 
