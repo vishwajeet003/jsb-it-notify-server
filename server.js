@@ -2,7 +2,9 @@ import express from "express";
 import cors from "cors";
 import PDFDocument from "pdfkit";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
+import { MongoClient } from "mongodb";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -11,10 +13,49 @@ const FROM_EMAIL = process.env.FROM_EMAIL || "JSB IT Ticketing <onboarding@resen
 const TECH_EMAIL = process.env.TECH_EMAIL || "tech@armoroctrading.com";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const MONGODB_URI = process.env.MONGODB_URI;
+// Default password is "ArmorocIT#2026". To change it, compute a new SHA-256 hex hash
+// (e.g. in a browser console: crypto.subtle.digest(...)) and set TECH_PASSWORD_HASH on Render.
+const TECH_PASSWORD_HASH =
+  process.env.TECH_PASSWORD_HASH || "27971294fcf54e3ce43880dbb67035edb6147399280fbb419a667cdb4d01b2f3";
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+let ticketsCollection = null;
+if (MONGODB_URI) {
+  const client = new MongoClient(MONGODB_URI);
+  client
+    .connect()
+    .then(async () => {
+      ticketsCollection = client.db("jsb_it_ticketing").collection("tickets");
+      await ticketsCollection.createIndex({ id: 1 }, { unique: true });
+      console.log("Connected to MongoDB — shared ticket storage is active.");
+    })
+    .catch((err) => {
+      console.error("MongoDB connection failed — shared ticket storage disabled:", err.message);
+    });
+} else {
+  console.warn("MONGODB_URI not set — shared ticket storage disabled (email/Telegram still work).");
+}
+
+function genTicketId() {
+  const now = new Date();
+  const ymd = now.getFullYear() + String(now.getMonth() + 1).padStart(2, "0") + String(now.getDate()).padStart(2, "0");
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `TCK-${ymd}-${rand}`;
+}
+
+function sha256Hex(text) {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function stripMongoId(doc) {
+  if (!doc) return doc;
+  const { _id, ...rest } = doc;
+  return rest;
+}
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -163,6 +204,95 @@ app.post("/api/tickets/notify", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Failed to generate or send the ticket notification." });
+  }
+});
+
+async function notifyAll(ticket) {
+  try {
+    const pdfBuffer = await buildTicketPdf(ticket);
+    await sendEmail(ticket, pdfBuffer);
+    try {
+      await sendTelegram(ticket, pdfBuffer);
+    } catch (telegramErr) {
+      console.error("Telegram notification failed (non-fatal):", telegramErr);
+    }
+    return true;
+  } catch (err) {
+    console.error("Notification failed:", err);
+    return false;
+  }
+}
+
+app.get("/api/tickets", async (req, res) => {
+  if (!ticketsCollection) {
+    return res.status(503).json({ ok: false, error: "Shared ticket storage isn't set up yet (MONGODB_URI missing)." });
+  }
+  try {
+    const docs = await ticketsCollection.find({}).sort({ openedAt: -1 }).toArray();
+    return res.json({ ok: true, tickets: docs.map(stripMongoId) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Failed to load tickets." });
+  }
+});
+
+app.post("/api/tickets", async (req, res) => {
+  const body = req.body || {};
+  if (!body.employeeName || !body.category || !body.priority) {
+    return res.status(400).json({ ok: false, error: "Missing required ticket fields." });
+  }
+
+  const ticket = {
+    id: genTicketId(),
+    employeeName: body.employeeName,
+    category: body.category,
+    otherDescription: body.otherDescription || "",
+    description: body.description || "",
+    neededBy: body.neededBy || "",
+    priority: body.priority,
+    status: "Open",
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+  };
+
+  let persisted = false;
+  if (ticketsCollection) {
+    try {
+      await ticketsCollection.insertOne({ ...ticket });
+      persisted = true;
+    } catch (err) {
+      console.error("Failed to persist ticket:", err);
+    }
+  }
+
+  const notified = RESEND_API_KEY ? await notifyAll(ticket) : false;
+
+  return res.json({ ok: true, ticket, persisted, notified });
+});
+
+app.post("/api/tickets/:id/close", async (req, res) => {
+  if (!ticketsCollection) {
+    return res.status(503).json({ ok: false, error: "Shared ticket storage isn't set up yet (MONGODB_URI missing)." });
+  }
+  const password = (req.body || {}).password;
+  if (!password || sha256Hex(password) !== TECH_PASSWORD_HASH) {
+    return res.status(403).json({ ok: false, error: "Incorrect technician password." });
+  }
+
+  try {
+    // mongodb driver v6 returns the updated document directly (not wrapped in { value })
+    const updatedTicket = await ticketsCollection.findOneAndUpdate(
+      { id: req.params.id, status: "Open" },
+      { $set: { status: "Closed", closedAt: new Date().toISOString() } },
+      { returnDocument: "after" }
+    );
+    if (!updatedTicket) {
+      return res.status(404).json({ ok: false, error: "Ticket not found or already closed." });
+    }
+    return res.json({ ok: true, ticket: stripMongoId(updatedTicket) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Failed to close ticket." });
   }
 });
 

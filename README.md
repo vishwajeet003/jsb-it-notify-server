@@ -32,6 +32,20 @@ This is free forever and takes about 2 minutes — no business verification need
 5. In a browser, visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` (replace `<YOUR_TOKEN>`). Look for `"chat":{"id":123456789,...}` in the response — that number is `TELEGRAM_CHAT_ID`.
 6. Add both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to your `.env` (and later, to Render's environment variables). Leave them blank to skip Telegram entirely — email will keep working either way.
 
+## 2c. (Recommended) Set up MongoDB Atlas for shared ticket storage
+
+Without this, ticket submission still emails/Telegrams the technician, but Open Tickets and Ticket History will show "storage isn't set up yet" — nothing is saved anywhere shared, and every employee/device is blind to every other one's tickets.
+
+1. Go to https://www.mongodb.com/cloud/atlas/register and create a free account.
+2. Create a free cluster (pick the **M0 Free** tier — it never expires, unlike some other free database tiers).
+3. Under **Database Access**, add a database user (username + password — save the password somewhere safe).
+4. Under **Network Access**, add IP address `0.0.0.0/0` ("Allow access from anywhere"). This is required because Render's free tier doesn't have a fixed outbound IP to whitelist more narrowly.
+5. Click **Connect** on your cluster → **Drivers** → copy the connection string. It looks like:
+   `mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`
+6. Replace `<username>` and `<password>` with the database user you created, and set that as `MONGODB_URI` in `.env` (and later, on Render).
+
+This connection string contains a real password — treat it like any other secret (don't post it anywhere public).
+
 ## 3. Run it locally (optional, to test)
 
 ```
@@ -57,7 +71,7 @@ You should get `{"ok":true}` and an email should land at `tech@armoroctrading.co
    - **Build Command:** `npm install`
    - **Start Command:** `npm start`
    - **Instance Type:** Free
-4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`, and `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` if using Telegram).
+4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` if using Telegram, and `MONGODB_URI` for shared ticket storage).
 5. Click **Create Web Service**. After it deploys, Render gives you a URL like `https://jsb-it-notify.onrender.com`.
 
 ## 5. Wire it into the ticketing app
@@ -65,15 +79,9 @@ You should get `{"ok":true}` and an email should land at `tech@armoroctrading.co
 Open `index.html` (the ticketing app) and find this line near the top of the `<script>` block:
 
 ```js
-var NOTIFY_SERVER_URL = "";
+var API_BASE_URL = "https://jsb-it-notify-server.onrender.com";
 ```
 
-Set it to your deployed URL + `/api/tickets/notify`, e.g.:
-
-```js
-var NOTIFY_SERVER_URL = "https://jsb-it-notify.onrender.com/api/tickets/notify";
-```
-
-Save the file. From then on, every submitted ticket automatically emails a PDF to the IT technician — no employee action needed.
+Set it to your deployed URL (no trailing slash). `index.html` derives both the notify and tickets endpoints from it. From then on, every submitted ticket automatically emails a PDF to the IT technician (and Telegram, if configured) — and, once `MONGODB_URI` is set, is also saved centrally so every employee/device sees the same Open Tickets and History lists.
 
 **Note:** Render's free tier "spins down" the service after periods of inactivity, so the first request after a while can take ~30-50 seconds to wake it up (the second request onward is fast). If that delay is a problem, Render's cheapest paid tier keeps it always-on.
