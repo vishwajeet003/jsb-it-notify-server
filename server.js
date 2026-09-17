@@ -13,15 +13,19 @@ const FROM_EMAIL = process.env.FROM_EMAIL || "JSB IT Ticketing <onboarding@resen
 const TECH_EMAIL = process.env.TECH_EMAIL || "tech@armoroctrading.com";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const CALLMEBOT_PHONE = process.env.CALLMEBOT_PHONE;
+const CALLMEBOT_APIKEY = process.env.CALLMEBOT_APIKEY;
 const MONGODB_URI = process.env.MONGODB_URI;
-// Default password is "ArmorocIT#2026". To change it, compute a new SHA-256 hex hash
+// Default close-ticket PIN is "2003". To change it, compute a new SHA-256 hex hash
 // (e.g. in a browser console: crypto.subtle.digest(...)) and set TECH_PASSWORD_HASH on Render.
 const TECH_PASSWORD_HASH =
-  process.env.TECH_PASSWORD_HASH || "27971294fcf54e3ce43880dbb67035edb6147399280fbb419a667cdb4d01b2f3";
+  process.env.TECH_PASSWORD_HASH || "77459b9b941bcb4714d0c121313c900ecf30541d158eb2b9b178cdb8eca6457e";
+
+const MAX_ATTACHMENTS = 5;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 let ticketsCollection = null;
 if (MONGODB_URI) {
@@ -55,6 +59,14 @@ function stripMongoId(doc) {
   if (!doc) return doc;
   const { _id, ...rest } = doc;
   return rest;
+}
+
+function sanitizeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((a) => a && typeof a.dataUrl === "string" && /^data:image\/(png|jpe?g|webp|gif);base64,/i.test(a.dataUrl))
+    .slice(0, MAX_ATTACHMENTS)
+    .map((a) => ({ name: String(a.name || "photo").slice(0, 200), dataUrl: a.dataUrl }));
 }
 
 function formatDate(iso) {
@@ -103,6 +115,28 @@ function buildTicketPdf(ticket) {
       y += 26;
     });
 
+    const attachments = sanitizeAttachments(ticket.attachments);
+    if (attachments.length) {
+      y += 8;
+      doc.fontSize(11).font("Helvetica-Bold").fillColor("#0A1442").text("Attached Photos", 50, y);
+      y += 20;
+      const imgSize = 140;
+      const gap = 14;
+      let x = 50;
+      attachments.forEach((att) => {
+        try {
+          const base64 = att.dataUrl.split(",")[1];
+          const buf = Buffer.from(base64, "base64");
+          if (x + imgSize > 545) { x = 50; y += imgSize + gap; }
+          if (y + imgSize > 700) { doc.addPage(); x = 50; y = 50; }
+          doc.image(buf, x, y, { fit: [imgSize, imgSize] });
+          x += imgSize + gap;
+        } catch (e) {
+          console.warn("Could not embed attachment image in PDF:", e.message);
+        }
+      });
+    }
+
     doc
       .fontSize(9)
       .fillColor("#8896AA")
@@ -125,6 +159,9 @@ function ticketSummaryLines(t) {
   ];
   if (t.description) lines.push(`Description: ${t.description}`);
   lines.push(`Priority: ${t.priority}`, `Needed by: ${formatDate(t.neededBy)}`, `Opened at: ${formatDate(t.openedAt)}`);
+  if (Array.isArray(t.attachments) && t.attachments.length) {
+    lines.push(`Photos attached: ${t.attachments.length} (see PDF)`);
+  }
   return lines;
 }
 
@@ -177,6 +214,21 @@ async function sendTelegram(t, pdfBuffer) {
   }
 }
 
+async function sendWhatsapp(t) {
+  if (!CALLMEBOT_PHONE || !CALLMEBOT_APIKEY) return;
+
+  const text = ticketSummaryLines(t).join("\n").slice(0, 1000);
+  const url =
+    "https://api.callmebot.com/whatsapp.php?" +
+    new URLSearchParams({ phone: CALLMEBOT_PHONE, text, apikey: CALLMEBOT_APIKEY }).toString();
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("CallMeBot rejected the request:", errText);
+  }
+}
+
 app.get("/", (req, res) => {
   res.send("JSB IT Ticketing notify server is running.");
 });
@@ -199,6 +251,11 @@ app.post("/api/tickets/notify", async (req, res) => {
     } catch (telegramErr) {
       console.error("Telegram notification failed (non-fatal):", telegramErr);
     }
+    try {
+      await sendWhatsapp(t);
+    } catch (whatsappErr) {
+      console.error("WhatsApp notification failed (non-fatal):", whatsappErr);
+    }
 
     return res.json({ ok: true });
   } catch (err) {
@@ -215,6 +272,11 @@ async function notifyAll(ticket) {
       await sendTelegram(ticket, pdfBuffer);
     } catch (telegramErr) {
       console.error("Telegram notification failed (non-fatal):", telegramErr);
+    }
+    try {
+      await sendWhatsapp(ticket);
+    } catch (whatsappErr) {
+      console.error("WhatsApp notification failed (non-fatal):", whatsappErr);
     }
     return true;
   } catch (err) {
@@ -250,6 +312,7 @@ app.post("/api/tickets", async (req, res) => {
     description: body.description || "",
     neededBy: body.neededBy || "",
     priority: body.priority,
+    attachments: sanitizeAttachments(body.attachments),
     status: "Open",
     openedAt: new Date().toISOString(),
     closedAt: null,

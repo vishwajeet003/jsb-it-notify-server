@@ -1,6 +1,6 @@
 # JSB IT Ticketing — Notify Server
 
-Tiny server that receives a submitted ticket from the ticketing app (`index.html`), generates a PDF, and automatically emails it to the IT technician via [Resend](https://resend.com) — and, optionally, sends the same PDF to a Telegram chat via a bot.
+Tiny server that receives a submitted ticket from the ticketing app (`index.html`), generates a PDF, and automatically emails it to the IT technician via [Resend](https://resend.com) — and, optionally, sends the same PDF to a Telegram chat via a bot, and/or a text summary to WhatsApp via CallMeBot.
 
 ## 1. Get a Resend API key
 
@@ -32,7 +32,18 @@ This is free forever and takes about 2 minutes — no business verification need
 5. In a browser, visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` (replace `<YOUR_TOKEN>`). Look for `"chat":{"id":123456789,...}` in the response — that number is `TELEGRAM_CHAT_ID`.
 6. Add both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to your `.env` (and later, to Render's environment variables). Leave them blank to skip Telegram entirely — email will keep working either way.
 
-## 2c. (Recommended) Set up MongoDB Atlas for shared ticket storage
+## 2c. (Optional) Set up WhatsApp notifications via CallMeBot
+
+Free, no business account or verification needed. Limitation: it only sends a text summary (no PDF attachment), and it sends to one WhatsApp number.
+
+1. Save this number in your phone's contacts: **+34 644 59 71 67** (CallMeBot's bot number).
+2. From your phone (the number that should *receive* the ticket notifications — e.g. the technician's), send this exact WhatsApp message to that contact: `I allow callmebot to send me messages`.
+3. Wait for a reply containing your personal API key (a number like `123456`).
+4. Add both `CALLMEBOT_PHONE` (your phone number in international format, no `+` or spaces, e.g. `15551234567`) and `CALLMEBOT_APIKEY` to your `.env` (and later, to Render's environment variables). Leave them blank to skip WhatsApp entirely — email/Telegram keep working either way.
+
+If you stop getting messages after a while, CallMeBot may require re-sending the opt-in message — it's a free, unofficial service with no uptime guarantee.
+
+## 2d. (Recommended) Set up MongoDB Atlas for shared ticket storage
 
 Without this, ticket submission still emails/Telegrams the technician, but Open Tickets and Ticket History will show "storage isn't set up yet" — nothing is saved anywhere shared, and every employee/device is blind to every other one's tickets.
 
@@ -71,7 +82,7 @@ You should get `{"ok":true}` and an email should land at `tech@armoroctrading.co
    - **Build Command:** `npm install`
    - **Start Command:** `npm start`
    - **Instance Type:** Free
-4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` if using Telegram, and `MONGODB_URI` for shared ticket storage).
+4. Under **Environment**, add the same variables from your `.env` file (`RESEND_API_KEY`, `FROM_EMAIL`, `TECH_EMAIL`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` if using Telegram, `CALLMEBOT_PHONE`/`CALLMEBOT_APIKEY` if using WhatsApp, and `MONGODB_URI` for shared ticket storage).
 5. Click **Create Web Service**. After it deploys, Render gives you a URL like `https://jsb-it-notify.onrender.com`.
 
 ## 5. Wire it into the ticketing app
@@ -82,6 +93,6 @@ Open `index.html` (the ticketing app) and find this line near the top of the `<s
 var API_BASE_URL = "https://jsb-it-notify-server.onrender.com";
 ```
 
-Set it to your deployed URL (no trailing slash). `index.html` derives both the notify and tickets endpoints from it. From then on, every submitted ticket automatically emails a PDF to the IT technician (and Telegram, if configured) — and, once `MONGODB_URI` is set, is also saved centrally so every employee/device sees the same Open Tickets and History lists.
+Set it to your deployed URL (no trailing slash). `index.html` derives both the notify and tickets endpoints from it. From then on, every submitted ticket automatically emails a PDF to the IT technician (and Telegram/WhatsApp, if configured) — and, once `MONGODB_URI` is set, is also saved centrally so every employee/device sees the same Open Tickets and History lists.
 
 **Note:** Render's free tier "spins down" the service after periods of inactivity, so the first request after a while can take ~30-50 seconds to wake it up (the second request onward is fast). If that delay is a problem, Render's cheapest paid tier keeps it always-on.
