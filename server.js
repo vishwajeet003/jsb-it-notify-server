@@ -25,7 +25,7 @@ const MAX_ATTACHMENTS = 5;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "40mb" }));
 
 let ticketsCollection = null;
 if (MONGODB_URI) {
@@ -61,12 +61,20 @@ function stripMongoId(doc) {
   return rest;
 }
 
+const IMAGE_DATA_URL_RE = /^data:image\/(png|jpe?g|webp|gif);base64,/i;
+const DOC_DATA_URL_RE =
+  /^data:(application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|application\/vnd\.ms-excel|application\/vnd\.ms-powerpoint|text\/plain|text\/csv);base64,/i;
+
+function isImageDataUrl(dataUrl) {
+  return typeof dataUrl === "string" && IMAGE_DATA_URL_RE.test(dataUrl);
+}
+
 function sanitizeAttachments(list) {
   if (!Array.isArray(list)) return [];
   return list
-    .filter((a) => a && typeof a.dataUrl === "string" && /^data:image\/(png|jpe?g|webp|gif);base64,/i.test(a.dataUrl))
+    .filter((a) => a && typeof a.dataUrl === "string" && (IMAGE_DATA_URL_RE.test(a.dataUrl) || DOC_DATA_URL_RE.test(a.dataUrl)))
     .slice(0, MAX_ATTACHMENTS)
-    .map((a) => ({ name: String(a.name || "photo").slice(0, 200), dataUrl: a.dataUrl }));
+    .map((a) => ({ name: String(a.name || "attachment").slice(0, 200), dataUrl: a.dataUrl }));
 }
 
 function formatDate(iso) {
@@ -116,14 +124,17 @@ function buildTicketPdf(ticket) {
     });
 
     const attachments = sanitizeAttachments(ticket.attachments);
-    if (attachments.length) {
+    const imageAttachments = attachments.filter((a) => isImageDataUrl(a.dataUrl));
+    const docAttachments = attachments.filter((a) => !isImageDataUrl(a.dataUrl));
+
+    if (imageAttachments.length) {
       y += 8;
       doc.fontSize(11).font("Helvetica-Bold").fillColor("#0A1442").text("Attached Photos", 50, y);
       y += 20;
       const imgSize = 140;
       const gap = 14;
       let x = 50;
-      attachments.forEach((att) => {
+      imageAttachments.forEach((att) => {
         try {
           const base64 = att.dataUrl.split(",")[1];
           const buf = Buffer.from(base64, "base64");
@@ -134,6 +145,19 @@ function buildTicketPdf(ticket) {
         } catch (e) {
           console.warn("Could not embed attachment image in PDF:", e.message);
         }
+      });
+      y += imgSize + gap;
+    }
+
+    if (docAttachments.length) {
+      if (y > 700) { doc.addPage(); y = 50; }
+      y += 8;
+      doc.fontSize(11).font("Helvetica-Bold").fillColor("#0A1442").text("Attached Documents", 50, y);
+      y += 18;
+      docAttachments.forEach((att) => {
+        if (y > 740) { doc.addPage(); y = 50; }
+        doc.fontSize(10).font("Helvetica").fillColor("#16213E").text(`• ${att.name} (see email attachments)`, 60, y);
+        y += 16;
       });
     }
 
@@ -159,14 +183,19 @@ function ticketSummaryLines(t) {
   ];
   if (t.description) lines.push(`Description: ${t.description}`);
   lines.push(`Priority: ${t.priority}`, `Needed by: ${formatDate(t.neededBy)}`, `Opened at: ${formatDate(t.openedAt)}`);
-  if (Array.isArray(t.attachments) && t.attachments.length) {
-    lines.push(`Photos attached: ${t.attachments.length} (see PDF)`);
-  }
+  const attachments = sanitizeAttachments(t.attachments);
+  const imageCount = attachments.filter((a) => isImageDataUrl(a.dataUrl)).length;
+  const docCount = attachments.length - imageCount;
+  if (imageCount) lines.push(`Photos attached: ${imageCount} (see PDF)`);
+  if (docCount) lines.push(`Documents attached: ${docCount} (see email attachments)`);
   return lines;
 }
 
 async function sendEmail(t, pdfBuffer) {
   const subject = `IT Ticket ${t.id} [${t.priority}] - ${t.category}`;
+  const docAttachments = sanitizeAttachments(t.attachments)
+    .filter((a) => !isImageDataUrl(a.dataUrl))
+    .map((a) => ({ filename: a.name, content: a.dataUrl.split(",")[1] }));
   const resendRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -183,6 +212,7 @@ async function sendEmail(t, pdfBuffer) {
           filename: `${t.id}.pdf`,
           content: pdfBuffer.toString("base64"),
         },
+        ...docAttachments,
       ],
     }),
   });
@@ -331,6 +361,36 @@ app.post("/api/tickets", async (req, res) => {
   const notified = RESEND_API_KEY ? await notifyAll(ticket) : false;
 
   return res.json({ ok: true, ticket, persisted, notified });
+});
+
+app.post("/api/tickets/:id/note", async (req, res) => {
+  if (!ticketsCollection) {
+    return res.status(503).json({ ok: false, error: "Shared ticket storage isn't set up yet (MONGODB_URI missing)." });
+  }
+  const password = (req.body || {}).password;
+  if (!password || sha256Hex(password) !== TECH_PASSWORD_HASH) {
+    return res.status(403).json({ ok: false, error: "Incorrect IT passcode." });
+  }
+  const text = ((req.body || {}).note || "").toString().trim();
+  if (!text) {
+    return res.status(400).json({ ok: false, error: "Update text is required." });
+  }
+
+  try {
+    const note = { text, at: new Date().toISOString() };
+    const updatedTicket = await ticketsCollection.findOneAndUpdate(
+      { id: req.params.id },
+      { $push: { itNotes: { $each: [note], $position: 0 } } },
+      { returnDocument: "after" }
+    );
+    if (!updatedTicket) {
+      return res.status(404).json({ ok: false, error: "Ticket not found." });
+    }
+    return res.json({ ok: true, ticket: stripMongoId(updatedTicket) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Failed to post the update." });
+  }
 });
 
 app.post("/api/tickets/:id/close", async (req, res) => {
