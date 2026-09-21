@@ -28,27 +28,20 @@ app.use(cors());
 app.use(express.json({ limit: "40mb" }));
 
 let ticketsCollection = null;
-let employeesCollection = null;
-let assetsCollection = null;
 if (MONGODB_URI) {
   const client = new MongoClient(MONGODB_URI);
   client
     .connect()
     .then(async () => {
-      const db = client.db("jsb_it_ticketing");
-      ticketsCollection = db.collection("tickets");
+      ticketsCollection = client.db("jsb_it_ticketing").collection("tickets");
       await ticketsCollection.createIndex({ id: 1 }, { unique: true });
-      employeesCollection = db.collection("it_employees");
-      await employeesCollection.createIndex({ id: 1 }, { unique: true });
-      assetsCollection = db.collection("it_assets");
-      await assetsCollection.createIndex({ id: 1 }, { unique: true });
-      console.log("Connected to MongoDB — shared ticket + IT asset storage is active.");
+      console.log("Connected to MongoDB — shared ticket storage is active.");
     })
     .catch((err) => {
-      console.error("MongoDB connection failed — shared storage disabled:", err.message);
+      console.error("MongoDB connection failed — shared ticket storage disabled:", err.message);
     });
 } else {
-  console.warn("MONGODB_URI not set — shared ticket + IT asset storage disabled (email/Telegram still work).");
+  console.warn("MONGODB_URI not set — shared ticket storage disabled (email/Telegram still work).");
 }
 
 function genTicketId() {
@@ -66,30 +59,6 @@ function stripMongoId(doc) {
   if (!doc) return doc;
   const { _id, ...rest } = doc;
   return rest;
-}
-
-function genId(prefix) {
-  return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
-}
-
-// Same PIN as the ticket-close/IT-update passcode ("2003" by default) — intentionally shared,
-// not a typo. See TECH_PASSWORD_HASH above.
-function checkPin(password) {
-  return !!password && sha256Hex(password) === TECH_PASSWORD_HASH;
-}
-
-function staticHolderLabel(holderType) {
-  if (holderType === "IT_ROOM") return "IT Room";
-  if (holderType === "STORAGE") return "In Storage";
-  return null;
-}
-
-async function resolveHolderLabel(holderType, holderId) {
-  if (holderType === "employee" && holderId && employeesCollection) {
-    const emp = await employeesCollection.findOne({ id: holderId });
-    return emp ? emp.name : null;
-  }
-  return staticHolderLabel(holderType);
 }
 
 const IMAGE_DATA_URL_RE = /^data:image\/(png|jpe?g|webp|gif);base64,/i;
@@ -447,183 +416,6 @@ app.post("/api/tickets/:id/close", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Failed to close ticket." });
-  }
-});
-
-/* ---------- IT Assets: employees ---------- */
-app.get("/api/it-assets/employees", async (req, res) => {
-  if (!employeesCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  try {
-    const docs = await employeesCollection.find({}).sort({ name: 1 }).toArray();
-    return res.json({ ok: true, employees: docs.map(stripMongoId) });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to load employees." });
-  }
-});
-
-app.post("/api/it-assets/employees", async (req, res) => {
-  if (!employeesCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  const body = req.body || {};
-  if (!checkPin(body.password)) {
-    return res.status(403).json({ ok: false, error: "Incorrect PIN." });
-  }
-  const name = (body.name || "").toString().trim();
-  if (!name) {
-    return res.status(400).json({ ok: false, error: "Employee name is required." });
-  }
-  const employee = {
-    id: genId("EMP"),
-    name,
-    jobRole: (body.jobRole || "").toString().trim(),
-    companyNumber: (body.companyNumber || "").toString().trim(),
-    companyEmail: (body.companyEmail || "").toString().trim(),
-    joinDate: (body.joinDate || "").toString().trim(),
-    photo: isImageDataUrl(body.photo) ? body.photo : "",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  try {
-    await employeesCollection.insertOne({ ...employee });
-    return res.json({ ok: true, employee });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to save employee." });
-  }
-});
-
-app.put("/api/it-assets/employees/:id", async (req, res) => {
-  if (!employeesCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  const body = req.body || {};
-  if (!checkPin(body.password)) {
-    return res.status(403).json({ ok: false, error: "Incorrect PIN." });
-  }
-  const name = (body.name || "").toString().trim();
-  if (!name) {
-    return res.status(400).json({ ok: false, error: "Employee name is required." });
-  }
-  const update = {
-    name,
-    jobRole: (body.jobRole || "").toString().trim(),
-    companyNumber: (body.companyNumber || "").toString().trim(),
-    companyEmail: (body.companyEmail || "").toString().trim(),
-    joinDate: (body.joinDate || "").toString().trim(),
-    updatedAt: new Date().toISOString(),
-  };
-  if (isImageDataUrl(body.photo)) update.photo = body.photo;
-  try {
-    const updated = await employeesCollection.findOneAndUpdate(
-      { id: req.params.id },
-      { $set: update },
-      { returnDocument: "after" }
-    );
-    if (!updated) return res.status(404).json({ ok: false, error: "Employee not found." });
-    return res.json({ ok: true, employee: stripMongoId(updated) });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to update employee." });
-  }
-});
-
-/* ---------- IT Assets: assets ---------- */
-app.get("/api/it-assets/assets", async (req, res) => {
-  if (!assetsCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  try {
-    const docs = await assetsCollection.find({}).sort({ name: 1 }).toArray();
-    return res.json({ ok: true, assets: docs.map(stripMongoId) });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to load assets." });
-  }
-});
-
-app.post("/api/it-assets/assets", async (req, res) => {
-  if (!assetsCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  const body = req.body || {};
-  if (!checkPin(body.password)) {
-    return res.status(403).json({ ok: false, error: "Incorrect PIN." });
-  }
-  const name = (body.name || "").toString().trim();
-  if (!name) {
-    return res.status(400).json({ ok: false, error: "Asset name is required." });
-  }
-  const holderType = ["employee", "IT_ROOM", "STORAGE"].includes(body.holderType) ? body.holderType : "UNASSIGNED";
-  const holderId = holderType === "employee" ? (body.holderId || "").toString().trim() : null;
-
-  let previousOwnerLabel = null;
-  if (typeof body.previousOwnerLabel === "string" && body.previousOwnerLabel.trim()) {
-    previousOwnerLabel = body.previousOwnerLabel.trim();
-  }
-
-  const asset = {
-    id: genId("AST"),
-    name,
-    photo: isImageDataUrl(body.photo) ? body.photo : "",
-    holderType,
-    holderId: holderType === "employee" ? holderId : null,
-    previousOwnerLabel,
-    assignedAt: holderType === "UNASSIGNED" ? null : new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  try {
-    await assetsCollection.insertOne({ ...asset });
-    return res.json({ ok: true, asset });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to save asset." });
-  }
-});
-
-app.put("/api/it-assets/assets/:id", async (req, res) => {
-  if (!assetsCollection) {
-    return res.status(503).json({ ok: false, error: "Shared IT asset storage isn't set up yet (MONGODB_URI missing)." });
-  }
-  const body = req.body || {};
-  if (!checkPin(body.password)) {
-    return res.status(403).json({ ok: false, error: "Incorrect PIN." });
-  }
-
-  try {
-    const existing = await assetsCollection.findOne({ id: req.params.id });
-    if (!existing) return res.status(404).json({ ok: false, error: "Asset not found." });
-
-    const update = { updatedAt: new Date().toISOString() };
-    if (typeof body.name === "string" && body.name.trim()) update.name = body.name.trim();
-    if (isImageDataUrl(body.photo)) update.photo = body.photo;
-
-    if (body.holderType && ["employee", "IT_ROOM", "STORAGE", "UNASSIGNED"].includes(body.holderType)) {
-      const newHolderType = body.holderType;
-      const newHolderId = newHolderType === "employee" ? (body.holderId || "").toString().trim() : null;
-      const holderChanged = newHolderType !== existing.holderType || newHolderId !== (existing.holderId || null);
-      if (holderChanged) {
-        const prevLabel = await resolveHolderLabel(existing.holderType, existing.holderId);
-        update.previousOwnerLabel = prevLabel;
-        update.assignedAt = new Date().toISOString();
-      }
-      update.holderType = newHolderType;
-      update.holderId = newHolderType === "employee" ? newHolderId : null;
-    }
-
-    const updated = await assetsCollection.findOneAndUpdate(
-      { id: req.params.id },
-      { $set: update },
-      { returnDocument: "after" }
-    );
-    return res.json({ ok: true, asset: stripMongoId(updated) });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ ok: false, error: "Failed to update asset." });
   }
 });
 
